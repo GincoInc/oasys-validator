@@ -91,7 +91,7 @@ func (v *BlockValidator) ValidateState(block *types.Block, statedb *state.StateD
 	}
 	// Tre receipt Trie's root (R = (Tr [[H1, R1], ... [Hn, Rn]]))
 	receiptSha := types.DeriveSha(receipts, trie.NewStackTrie(nil))
-	if receiptSha != header.ReceiptHash && block.NumberU64() != uint64(1084887) && block.NumberU64() != uint64(1495624) { // https://github.com/oasysgames/oasys-validator/issues/34
+	if receiptSha != header.ReceiptHash && block.NumberU64() != uint64(1084887) && block.NumberU64() != uint64(1495624) && block.NumberU64() != uint64(1510664) { // https://github.com/oasysgames/oasys-validator/issues/34
 		return fmt.Errorf("invalid receipt root hash (remote: %x local: %x)", header.ReceiptHash, receiptSha)
 	}
 	// Validate the state root against the received state root and throw
