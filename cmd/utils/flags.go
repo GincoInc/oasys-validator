@@ -36,6 +36,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/accounts/keystore"
+	"github.com/ethereum/go-ethereum/beacon/fakebeacon"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/fdlimit"
 	"github.com/ethereum/go-ethereum/core"
@@ -69,9 +70,9 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/netutil"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
-	"github.com/ethereum/go-ethereum/trie"
-	"github.com/ethereum/go-ethereum/trie/triedb/hashdb"
-	"github.com/ethereum/go-ethereum/trie/triedb/pathdb"
+	"github.com/ethereum/go-ethereum/triedb"
+	"github.com/ethereum/go-ethereum/triedb/hashdb"
+	"github.com/ethereum/go-ethereum/triedb/pathdb"
 	pcsclite "github.com/gballet/go-libpcsclite"
 	gopsutil "github.com/shirou/gopsutil/mem"
 	"github.com/urfave/cli/v2"
@@ -250,6 +251,24 @@ var (
 	OverrideVerkle = &cli.Uint64Flag{
 		Name:     "override.verkle",
 		Usage:    "Manually specify the Verkle fork timestamp, overriding the bundled setting",
+		Category: flags.EthCategory,
+	}
+	OverrideFullImmutabilityThreshold = &cli.Uint64Flag{
+		Name:     "override.immutabilitythreshold",
+		Usage:    "It is the number of blocks after which a chain segment is considered immutable, only for testing purpose",
+		Value:    params.FullImmutabilityThreshold,
+		Category: flags.EthCategory,
+	}
+	OverrideMinBlocksForBlobRequests = &cli.Uint64Flag{
+		Name:     "override.minforblobrequest",
+		Usage:    "It keeps blob data available for min blocks in local, only for testing purpose",
+		Value:    params.MinBlocksForBlobRequests,
+		Category: flags.EthCategory,
+	}
+	OverrideDefaultExtraReserveForBlobRequests = &cli.Uint64Flag{
+		Name:     "override.defaultextrareserve",
+		Usage:    "It adds more extra time for expired blobs for some request cases, only for testing purpose",
+		Value:    params.DefaultExtraReserveForBlobRequests,
 		Category: flags.EthCategory,
 	}
 	SyncModeFlag = &flags.TextMarshalerFlag{
@@ -908,6 +927,74 @@ Please note that --` + MetricsHTTPFlag.Name + ` must be set to start the server.
 		Value:    metrics.DefaultConfig.InfluxDBOrganization,
 		Category: flags.MetricsCategory,
 	}
+
+	VotingEnabledFlag = &cli.BoolFlag{
+		Name:     "vote",
+		Usage:    "Enable voting when mining",
+		Category: flags.FastFinalityCategory,
+	}
+
+	DisableVoteAttestationFlag = &cli.BoolFlag{
+		Name:     "disablevoteattestation",
+		Usage:    "Disable assembling vote attestation ",
+		Category: flags.FastFinalityCategory,
+	}
+
+	BLSPasswordFileFlag = &cli.StringFlag{
+		Name:     "blspassword",
+		Usage:    "Password file path for the BLS wallet, which contains the password to unlock BLS wallet for managing votes in fast_finality feature",
+		Category: flags.AccountCategory,
+	}
+
+	EnableMaliciousVoteMonitorFlag = &cli.BoolFlag{
+		Name:     "monitor.maliciousvote",
+		Usage:    "Enable malicious vote monitor to check whether any validator violates the voting rules of fast finality",
+		Category: flags.FastFinalityCategory,
+	}
+
+	BLSWalletDirFlag = &flags.DirectoryFlag{
+		Name:     "blswallet",
+		Usage:    "Path for the blsWallet dir in fast finality feature (default = inside the datadir)",
+		Category: flags.AccountCategory,
+	}
+
+	VoteJournalDirFlag = &flags.DirectoryFlag{
+		Name:     "vote-journal-path",
+		Usage:    "Path for the voteJournal dir in fast finality feature (default = inside the datadir)",
+		Category: flags.FastFinalityCategory,
+	}
+	VoteKeyNameFlag = &cli.StringFlag{
+		Name:     "vote-key-name",
+		Usage:    "Name of the BLS public key used for voting (default = first found key)",
+		Category: flags.FastFinalityCategory,
+	}
+
+	// Blob setting
+	BlobExtraReserveFlag = &cli.Uint64Flag{
+		Name:     "blob.extra-reserve",
+		Usage:    "Extra reserve threshold for blob, blob never expires when 0 is set, default 14400",
+		Value:    params.DefaultExtraReserveForBlobRequests,
+		Category: flags.MiscCategory,
+	}
+
+	// Fake beacon
+	FakeBeaconEnabledFlag = &cli.BoolFlag{
+		Name:     "fake-beacon",
+		Usage:    "Enable the HTTP-RPC server of fake-beacon",
+		Category: flags.APICategory,
+	}
+	FakeBeaconAddrFlag = &cli.StringFlag{
+		Name:     "fake-beacon.addr",
+		Usage:    "HTTP-RPC server listening addr of fake-beacon",
+		Value:    fakebeacon.DefaultAddr,
+		Category: flags.APICategory,
+	}
+	FakeBeaconPortFlag = &cli.IntFlag{
+		Name:     "fake-beacon.port",
+		Usage:    "HTTP-RPC server listening port of fake-beacon",
+		Value:    fakebeacon.DefaultPort,
+		Category: flags.APICategory,
+	}
 )
 
 var (
@@ -1214,6 +1301,13 @@ func setLes(ctx *cli.Context, cfg *ethconfig.Config) {
 	}
 }
 
+// setMonitors enable monitors from the command line flags.
+func setMonitors(ctx *cli.Context, cfg *node.Config) {
+	if ctx.Bool(EnableMaliciousVoteMonitorFlag.Name) {
+		cfg.EnableMaliciousVoteMonitor = true
+	}
+}
+
 // MakeDatabaseHandles raises out the number of allowed file handles per process
 // for Geth and returns half of the allowance to assign to the database.
 func MakeDatabaseHandles(max int) int {
@@ -1301,6 +1395,22 @@ func MakePasswordList(ctx *cli.Context) []string {
 	return lines
 }
 
+func MakePasswordListFromPath(path string) []string {
+	if path == "" {
+		return nil
+	}
+	text, err := os.ReadFile(path)
+	if err != nil {
+		Fatalf("Failed to read password file: %v", err)
+	}
+	lines := strings.Split(string(text), "\n")
+	// Sanitise DOS line endings.
+	for i := range lines {
+		lines[i] = strings.TrimRight(lines[i], "\r")
+	}
+	return lines
+}
+
 func SetP2PConfig(ctx *cli.Context, cfg *p2p.Config) {
 	setNodeKey(ctx, cfg)
 	setNAT(ctx, cfg)
@@ -1354,6 +1464,9 @@ func SetNodeConfig(ctx *cli.Context, cfg *node.Config) {
 	setNodeUserIdent(ctx, cfg)
 	SetDataDir(ctx, cfg)
 	setSmartCard(ctx, cfg)
+	setMonitors(ctx, cfg)
+	setBLSWalletDir(ctx, cfg)
+	setVoteJournalDir(ctx, cfg)
 
 	if ctx.IsSet(JWTSecretFlag.Name) {
 		cfg.JWTSecret = ctx.String(JWTSecretFlag.Name)
@@ -1384,6 +1497,12 @@ func SetNodeConfig(ctx *cli.Context, cfg *node.Config) {
 	}
 	if ctx.IsSet(InsecureUnlockAllowedFlag.Name) {
 		cfg.InsecureUnlockAllowed = ctx.Bool(InsecureUnlockAllowedFlag.Name)
+	}
+	if ctx.IsSet(BLSPasswordFileFlag.Name) {
+		cfg.BLSPasswordFile = ctx.String(BLSPasswordFileFlag.Name)
+	}
+	if ctx.IsSet(VoteKeyNameFlag.Name) {
+		cfg.VoteKeyName = ctx.String(VoteKeyNameFlag.Name)
 	}
 	if ctx.IsSet(DBEngineFlag.Name) {
 		dbEngine := ctx.String(DBEngineFlag.Name)
@@ -1434,6 +1553,24 @@ func SetDataDir(ctx *cli.Context, cfg *node.Config) {
 		cfg.DataDir = filepath.Join(node.DefaultDataDir(), "sepolia")
 	case ctx.Bool(HoleskyFlag.Name) && cfg.DataDir == node.DefaultDataDir():
 		cfg.DataDir = filepath.Join(node.DefaultDataDir(), "holesky")
+	}
+}
+
+func setVoteJournalDir(ctx *cli.Context, cfg *node.Config) {
+	dataDir := cfg.DataDir
+	if ctx.IsSet(VoteJournalDirFlag.Name) {
+		cfg.VoteJournalDir = ctx.String(VoteJournalDirFlag.Name)
+	} else if cfg.VoteJournalDir == "" {
+		cfg.VoteJournalDir = filepath.Join(dataDir, "voteJournal")
+	}
+}
+
+func setBLSWalletDir(ctx *cli.Context, cfg *node.Config) {
+	dataDir := cfg.DataDir
+	if ctx.IsSet(BLSWalletDirFlag.Name) {
+		cfg.BLSWalletDir = ctx.String(BLSWalletDirFlag.Name)
+	} else if cfg.BLSWalletDir == "" {
+		cfg.BLSWalletDir = filepath.Join(dataDir, "bls/wallet")
 	}
 }
 
@@ -1510,6 +1647,12 @@ func setMiner(ctx *cli.Context, cfg *miner.Config) {
 	}
 	if ctx.IsSet(MinerNewPayloadTimeout.Name) {
 		cfg.NewPayloadTimeout = ctx.Duration(MinerNewPayloadTimeout.Name)
+	}
+	if ctx.Bool(VotingEnabledFlag.Name) {
+		cfg.VoteEnable = true
+	}
+	if ctx.Bool(DisableVoteAttestationFlag.Name) {
+		cfg.DisableVoteAttestation = true
 	}
 }
 
@@ -1842,6 +1985,18 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	if err := kzg4844.UseCKZG(ctx.String(CryptoKZGFlag.Name) == "ckzg"); err != nil {
 		Fatalf("Failed to set KZG library implementation to %s: %v", ctx.String(CryptoKZGFlag.Name), err)
 	}
+
+	// blob setting
+	if ctx.IsSet(OverrideDefaultExtraReserveForBlobRequests.Name) {
+		cfg.BlobExtraReserve = ctx.Uint64(OverrideDefaultExtraReserveForBlobRequests.Name)
+	}
+	if ctx.IsSet(BlobExtraReserveFlag.Name) {
+		extraReserve := ctx.Uint64(BlobExtraReserveFlag.Name)
+		if extraReserve > 0 && extraReserve < params.DefaultExtraReserveForBlobRequests {
+			extraReserve = params.DefaultExtraReserveForBlobRequests
+		}
+		cfg.BlobExtraReserve = extraReserve
+	}
 }
 
 // SetDNSDiscoveryDefaults configures DNS discovery with the given URL if
@@ -2146,8 +2301,8 @@ func MakeConsolePreloads(ctx *cli.Context) []string {
 }
 
 // MakeTrieDatabase constructs a trie database based on the configured scheme.
-func MakeTrieDatabase(ctx *cli.Context, disk ethdb.Database, preimage bool, readOnly bool, isVerkle bool) *trie.Database {
-	config := &trie.Config{
+func MakeTrieDatabase(ctx *cli.Context, disk ethdb.Database, preimage bool, readOnly bool, isVerkle bool) *triedb.Database {
+	config := &triedb.Config{
 		Preimages: preimage,
 		IsVerkle:  isVerkle,
 	}
@@ -2160,12 +2315,12 @@ func MakeTrieDatabase(ctx *cli.Context, disk ethdb.Database, preimage bool, read
 		// ignore the parameter silently. TODO(rjl493456442)
 		// please config it if read mode is implemented.
 		config.HashDB = hashdb.Defaults
-		return trie.NewDatabase(disk, config)
+		return triedb.NewDatabase(disk, config)
 	}
 	if readOnly {
 		config.PathDB = pathdb.ReadOnly
 	} else {
 		config.PathDB = pathdb.Defaults
 	}
-	return trie.NewDatabase(disk, config)
+	return triedb.NewDatabase(disk, config)
 }

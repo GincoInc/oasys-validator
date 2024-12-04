@@ -50,6 +50,16 @@ type ChainHeaderReader interface {
 
 	// GetCanonicalHash returns the canonical hash for a given block number
 	GetCanonicalHash(number uint64) common.Hash
+
+	// GetVerifiedBlockByHash retrieves the highest verified block.
+	GetVerifiedBlockByHash(hash common.Hash) *types.Header
+
+	// ChasingHead return the best chain head of peers.
+	ChasingHead() *types.Header
+}
+
+type VotePool interface {
+	FetchVoteByBlockHash(blockHash common.Hash) []*types.VoteEnvelope
 }
 
 // ChainReader defines a small collection of methods needed to access the local
@@ -135,4 +145,9 @@ type PoS interface {
 	Engine
 
 	IsSystemTransaction(tx *types.Transaction, header *types.Header) (bool, error)
+	GetJustifiedNumberAndHash(chain ChainHeaderReader, headers []*types.Header) (uint64, common.Hash, error)
+	GetFinalizedHeader(chain ChainHeaderReader, header *types.Header) *types.Header
+	VerifyVote(chain ChainHeaderReader, vote *types.VoteEnvelope) error
+	DecodeVoteAttestation(header *types.Header) *types.VoteAttestation
+	IsActiveValidatorAt(chain ChainHeaderReader, header *types.Header, checkVoteKeyFn func(bLSPublicKey *types.BLSPublicKey) bool) bool
 }

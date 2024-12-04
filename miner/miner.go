@@ -53,6 +53,9 @@ type Config struct {
 	Recommit  time.Duration  // The time interval for miner to re-create mining work.
 
 	NewPayloadTimeout time.Duration // The maximum time allowance for creating a new payload
+
+	VoteEnable             bool // Whether to vote when mining
+	DisableVoteAttestation bool // Whether to skip assembling vote attestation
 }
 
 // DefaultConfig contains default settings for miner.
@@ -194,6 +197,11 @@ func (miner *Miner) SetExtra(extra []byte) error {
 		return fmt.Errorf("extra exceeds max length. %d > %v", len(extra), params.MaximumExtraDataSize)
 	}
 	miner.worker.setExtra(extra)
+	return nil
+}
+
+func (miner *Miner) SetGasTip(tip *big.Int) error {
+	miner.worker.setGasTip(tip)
 	return nil
 }
 

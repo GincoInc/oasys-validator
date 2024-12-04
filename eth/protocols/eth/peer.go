@@ -75,6 +75,8 @@ type Peer struct {
 	head common.Hash // Latest advertised head block hash
 	td   *big.Int    // Latest advertised head block total difficulty
 
+	justifiedBlock *uint64 // Latest advertised justified block
+
 	knownBlocks     *knownCache            // Set of block hashes known to be known by this peer
 	queuedBlocks    chan *blockPropagation // Queue of blocks to broadcast to the peer
 	queuedBlockAnns chan *types.Block      // Queue of blocks to announce to the peer
@@ -92,7 +94,7 @@ type Peer struct {
 	lock sync.RWMutex  // Mutex protecting the internal fields
 }
 
-// NewPeer create a wrapper for a network connection and negotiated  protocol
+// NewPeer creates a wrapper for a network connection and negotiated  protocol
 // version.
 func NewPeer(version uint, p *p2p.Peer, rw p2p.MsgReadWriter, txpool TxPool) *Peer {
 	peer := &Peer{
@@ -156,6 +158,22 @@ func (p *Peer) SetHead(hash common.Hash, td *big.Int) {
 	p.td.Set(td)
 }
 
+// JustifiedBlock retrieves the latest advertised justified block of the peer.
+func (p *Peer) JustifiedBlock() *uint64 {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	return p.justifiedBlock
+}
+
+// SetJustifiedBlock updates the latest advertised justified block of the peer.
+func (p *Peer) SetJustifiedBlock(num uint64) {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	p.justifiedBlock = &num
+}
+
 // KnownBlock returns whether peer is known to already have a block.
 func (p *Peer) KnownBlock(hash common.Hash) bool {
 	return p.knownBlocks.Contains(hash)
@@ -210,29 +228,17 @@ func (p *Peer) AsyncSendTransactions(hashes []common.Hash) {
 	}
 }
 
-// sendPooledTransactionHashes66 sends transaction hashes to the peer and includes
-// them in its transaction hash set for future reference.
-//
-// This method is a helper used by the async transaction announcer. Don't call it
-// directly as the queueing (memory) and transmission (bandwidth) costs should
-// not be managed directly.
-func (p *Peer) sendPooledTransactionHashes66(hashes []common.Hash) error {
-	// Mark all the transactions as known, but ensure we don't overflow our limits
-	p.knownTxs.Add(hashes...)
-	return p2p.Send(p.rw, NewPooledTransactionHashesMsg, NewPooledTransactionHashesPacket67(hashes))
-}
-
-// sendPooledTransactionHashes68 sends transaction hashes (tagged with their type
+// sendPooledTransactionHashes sends transaction hashes (tagged with their type
 // and size) to the peer and includes them in its transaction hash set for future
 // reference.
 //
 // This method is a helper used by the async transaction announcer. Don't call it
 // directly as the queueing (memory) and transmission (bandwidth) costs should
 // not be managed directly.
-func (p *Peer) sendPooledTransactionHashes68(hashes []common.Hash, types []byte, sizes []uint32) error {
+func (p *Peer) sendPooledTransactionHashes(hashes []common.Hash, types []byte, sizes []uint32) error {
 	// Mark all the transactions as known, but ensure we don't overflow our limits
 	p.knownTxs.Add(hashes...)
-	return p2p.Send(p.rw, NewPooledTransactionHashesMsg, NewPooledTransactionHashesPacket68{Types: types, Sizes: sizes, Hashes: hashes})
+	return p2p.Send(p.rw, NewPooledTransactionHashesMsg, NewPooledTransactionHashesPacket{Types: types, Sizes: sizes, Hashes: hashes})
 }
 
 // AsyncSendPooledTransactionHashes queues a list of transactions hashes to eventually
@@ -292,8 +298,9 @@ func (p *Peer) SendNewBlock(block *types.Block, td *big.Int) error {
 	// Mark all the block hash as known, but ensure we don't overflow our limits
 	p.knownBlocks.Add(block.Hash())
 	return p2p.Send(p.rw, NewBlockMsg, &NewBlockPacket{
-		Block: block,
-		TD:    td,
+		Block:    block,
+		TD:       td,
+		Sidecars: block.Sidecars(),
 	})
 }
 
@@ -323,14 +330,6 @@ func (p *Peer) ReplyBlockBodiesRLP(id uint64, bodies []rlp.RawValue) error {
 	return p2p.Send(p.rw, BlockBodiesMsg, &BlockBodiesRLPPacket{
 		RequestId:              id,
 		BlockBodiesRLPResponse: bodies,
-	})
-}
-
-// ReplyNodeData is the eth/66 response to GetNodeData.
-func (p *Peer) ReplyNodeData(id uint64, data [][]byte) error {
-	return p2p.Send(p.rw, NodeDataMsg, NodeDataPacket66{
-		RequestId:      id,
-		NodeDataPacket: data,
 	})
 }
 
